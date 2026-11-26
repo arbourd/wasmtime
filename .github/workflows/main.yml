@@ -1255,6 +1255,9 @@ jobs:
         include:
           - crate: "wasmtime --features component-model-bytes,component-model-async"
           - crate: "wasmtime-cli"
+            partition: "--partition slice:1/2"
+          - crate: "wasmtime-cli"
+            partition: "--partition slice:2/2"
           - crate: "wasmtime-environ --all-features"
           - crate: "pulley-interpreter --all-features"
           - crate: "wasmtime-internal-core"
@@ -1266,7 +1269,7 @@ jobs:
           - script: "./ci/miri-wast.sh ./tests/spec_testsuite/struct.wast -Ccollector=drc"
     needs: determine
     if: needs.determine.outputs.test-miri
-    name: Miri
+    name: Miri (${{ matrix.crate || matrix.script }}${{ matrix.partition && format(' {0}', matrix.partition) || '' }})
     runs-on: ubuntu-latest
     env:
       MIRIFLAGS: -Zmiri-permissive-provenance
@@ -1287,8 +1290,7 @@ jobs:
       with:
         crate: cargo-nextest
         version: 0.9.133
-    - run: |
-        cargo miri nextest run -j4 --no-fail-fast -p ${{ matrix.crate }}
+    - run: cargo miri nextest run -j4 --no-fail-fast -p ${{ matrix.crate }} ${{ matrix.partition }}
       if: ${{ matrix.crate }}
     - run: ${{ matrix.script }}
       if: ${{ matrix.script }}
