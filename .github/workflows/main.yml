@@ -181,6 +181,7 @@ jobs:
       run-full: ${{ steps.calculate.outputs.run-full }}
       test-matrix: ${{ steps.calculate.outputs.test-matrix }}
       build-matrix: ${{ steps.calculate.outputs.build-matrix }}
+      split-build-matrix: ${{ steps.calculate.outputs.split-build-matrix }}
       test-capi: ${{ steps.calculate.outputs.test-capi }}
       test-nightly: ${{ steps.calculate.outputs.test-nightly }}
       test-miri: ${{ steps.calculate.outputs.test-miri }}
@@ -260,8 +261,13 @@ jobs:
         echo "test-matrix={\"include\":$(echo $matrix)}" >> $GITHUB_OUTPUT
         echo "$matrix"
 
-        matrix="$(node ./ci/build-build-matrix.js)"
-        echo "build-matrix={\"include\":$(echo $matrix)}" >> $GITHUB_OUTPUT
+        matrices="$(node ./ci/build-build-matrix.js)"
+        build_matrix="$(jq -c '.buildMatrix' <<< "$matrices")"
+        split_build_matrix="$(jq -c '.splitBuildMatrix' <<< "$matrices")"
+        {
+          printf 'build-matrix=%s\n' "$build_matrix"
+          printf 'split-build-matrix=%s\n' "$split_build_matrix"
+        } >> "$GITHUB_OUTPUT"
 
         if [ "$run_full" = "true" ]; then
             echo run-full=true >> $GITHUB_OUTPUT
@@ -1422,12 +1428,112 @@ jobs:
       with:
         target: ${{ matrix.target }}
 
-    - run: ./ci/build-release-artifacts.sh "${{ matrix.build }}" "${{ matrix.target }}"
+    - run: ./ci/build-release-artifacts.sh "${{ matrix.build }}" "${{ matrix.target }}" ""
 
     # Assemble release artifacts appropriate for this platform, then upload them
     # unconditionally to this workflow's files so we have a copy of them.
     - run: ./ci/build-tarballs.sh "${{ matrix.build }}" "${{ matrix.target }}"
 
+    - uses: actions/upload-artifact@v7.0.2
+      with:
+        name: bins-${{ matrix.build }}
+        path: dist
+
+  build-cli:
+    needs: determine
+    if: needs.determine.outputs.run-full
+    name: Release CLI for ${{ matrix.build }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: ${{ github.event_name != 'pull_request' }}
+      matrix: ${{ fromJson(needs.determine.outputs.split-build-matrix) }}
+    env: ${{ matrix.env || fromJSON('{}') }}
+    steps:
+    - uses: actions/checkout@v7.0.1
+      with:
+        submodules: true
+    - uses: $/.github/actions/install-rust
+      with:
+        toolchain: ${{ matrix.rust }}
+    - run: |
+        rustup component add rust-src
+        rustup target add ${{ matrix.target }}
+    - run: ./ci/build-release-artifacts.sh "${{ matrix.build }}" "${{ matrix.target }}" cli
+    - uses: actions/upload-artifact@v7.0.2
+      if: matrix.os == 'macos-15'
+      with:
+        name: release-cli-${{ matrix.build }}
+        path: target/${{ matrix.target }}/release/wasmtime
+        retention-days: 1
+    - uses: actions/upload-artifact@v7.0.2
+      if: matrix.os == 'windows-2025'
+      with:
+        name: release-cli-${{ matrix.build }}
+        path: target/${{ matrix.target }}/release/wasmtime.exe
+        retention-days: 1
+
+  build-capi:
+    needs: determine
+    if: needs.determine.outputs.run-full
+    name: Release C API for ${{ matrix.build }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: ${{ github.event_name != 'pull_request' }}
+      matrix: ${{ fromJson(needs.determine.outputs.split-build-matrix) }}
+    env: ${{ matrix.env || fromJSON('{}') }}
+    steps:
+    - uses: actions/checkout@v7.0.1
+      with:
+        submodules: true
+    - uses: $/.github/actions/install-ninja
+    - uses: $/.github/actions/install-rust
+      with:
+        toolchain: ${{ matrix.rust }}
+    - run: |
+        rustup component add rust-src
+        rustup target add ${{ matrix.target }}
+    - run: ./ci/build-release-artifacts.sh "${{ matrix.build }}" "${{ matrix.target }}" capi
+    - uses: actions/upload-artifact@v7.0.2
+      with:
+        name: release-capi-${{ matrix.build }}
+        path: target/c-api-install/
+        retention-days: 1
+
+  package-split-release:
+    needs:
+      - determine
+      - build-cli
+      - build-capi
+    if: needs.determine.outputs.run-full
+    name: Package release for ${{ matrix.build }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: ${{ github.event_name != 'pull_request' }}
+      matrix: ${{ fromJson(needs.determine.outputs.split-build-matrix) }}
+    env: ${{ matrix.env || fromJSON('{}') }}
+    steps:
+    - name: Require WiX tools for MSI
+      if: matrix.build == 'x86_64-windows'
+      shell: bash
+      run: |
+        if [ ! -f "$WIX/bin/candle.exe" ] || [ ! -f "$WIX/bin/light.exe" ]; then
+          echo "::error::WiX tools missing. Expected both candle.exe and light.exe in $WIX/bin."
+          exit 1
+        fi
+    - uses: actions/checkout@v7.0.1
+      with:
+        submodules: true
+    - uses: actions/download-artifact@v7.0.2
+      with:
+        name: release-cli-${{ matrix.build }}
+        path: target/${{ matrix.target }}/release/
+    - uses: actions/download-artifact@v7.0.2
+      with:
+        name: release-capi-${{ matrix.build }}
+        path: target/c-api-install/
+    - run: chmod +x target/${{ matrix.target }}/release/wasmtime
+      if: matrix.os == 'macos-15'
+    - run: ./ci/build-tarballs.sh "${{ matrix.build }}" "${{ matrix.target }}"
     - uses: actions/upload-artifact@v7.0.2
       with:
         name: bins-${{ matrix.build }}
@@ -1470,6 +1576,9 @@ jobs:
       - test_debug_dwarf
       - test_nightly
       - build
+      - build-cli
+      - build-capi
+      - package-split-release
       - rustfmt
       - clangformat
       - cargo_deny

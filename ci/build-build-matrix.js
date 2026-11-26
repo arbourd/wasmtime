@@ -127,6 +127,14 @@ const array = [
 ];
 
 const builds = [];
+const splitBuildNames = new Set([
+  'x86_64-windows',
+  'x86_64-mingw',
+  'aarch64-windows',
+  'i686-windows',
+  'x86_64-macos',
+  'aarch64-macos',
+]);
 for (let build of array) {
   // Perform a "deep clone" roundtripping through JSON for a copy of the build
   // that's normal
@@ -144,4 +152,10 @@ for (let build of array) {
   builds.push(build);
 }
 
-console.log(JSON.stringify(builds));
+const splitBuilds = builds.filter((build) => splitBuildNames.has(build.build));
+const regularBuilds = builds.filter((build) => !splitBuildNames.has(build.build));
+
+console.log(JSON.stringify({
+  buildMatrix: { include: regularBuilds },
+  splitBuildMatrix: { include: splitBuilds },
+}));
