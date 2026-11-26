@@ -1265,7 +1265,7 @@ jobs:
           - script: "./ci/miri-wast.sh ./tests/spec_testsuite/struct.wast -Ccollector=copying"
           - script: "./ci/miri-wast.sh ./tests/spec_testsuite/struct.wast -Ccollector=drc"
     needs: determine
-    if: needs.determine.outputs.test-miri && github.repository == 'bytecodealliance/wasmtime'
+    if: needs.determine.outputs.test-miri
     name: Miri
     runs-on: ubuntu-latest
     env:
