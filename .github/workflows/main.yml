@@ -1523,11 +1523,11 @@ jobs:
     - uses: actions/checkout@v7.0.1
       with:
         submodules: true
-    - uses: actions/download-artifact@v7.0.2
+    - uses: actions/download-artifact@v8.0.2
       with:
         name: release-cli-${{ matrix.build }}
         path: target/${{ matrix.target }}/release/
-    - uses: actions/download-artifact@v7.0.2
+    - uses: actions/download-artifact@v8.0.2
       with:
         name: release-capi-${{ matrix.build }}
         path: target/c-api-install/
