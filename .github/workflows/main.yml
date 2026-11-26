@@ -1460,17 +1460,19 @@ jobs:
         rustup target add ${{ matrix.target }}
     - run: ./ci/build-release-artifacts.sh "${{ matrix.build }}" "${{ matrix.target }}" cli
     - uses: actions/upload-artifact@v7.0.2
-      if: matrix.os == 'macos-15'
+      if: runner.os != 'Windows'
       with:
         name: release-cli-${{ matrix.build }}
         path: target/${{ matrix.target }}/release/wasmtime
         retention-days: 1
+        if-no-files-found: error
     - uses: actions/upload-artifact@v7.0.2
-      if: matrix.os == 'windows-2025'
+      if: runner.os == 'Windows'
       with:
         name: release-cli-${{ matrix.build }}
         path: target/${{ matrix.target }}/release/wasmtime.exe
         retention-days: 1
+        if-no-files-found: error
 
   build-capi:
     needs: determine
@@ -1498,6 +1500,7 @@ jobs:
         name: release-capi-${{ matrix.build }}
         path: target/c-api-install/
         retention-days: 1
+        if-no-files-found: error
 
   package-split-release:
     needs:
@@ -1520,9 +1523,9 @@ jobs:
           echo "::error::WiX tools missing. Expected both candle.exe and light.exe in $WIX/bin."
           exit 1
         fi
+    # Packaging reads only top-level files and the downloaded artifacts, so it
+    # does not need the test-suite submodules.
     - uses: actions/checkout@v7.0.1
-      with:
-        submodules: true
     - uses: actions/download-artifact@v8.0.2
       with:
         name: release-cli-${{ matrix.build }}
@@ -1532,7 +1535,7 @@ jobs:
         name: release-capi-${{ matrix.build }}
         path: target/c-api-install/
     - run: chmod +x target/${{ matrix.target }}/release/wasmtime
-      if: matrix.os == 'macos-15'
+      if: runner.os != 'Windows'
     - run: ./ci/build-tarballs.sh "${{ matrix.build }}" "${{ matrix.target }}"
     - uses: actions/upload-artifact@v7.0.2
       with:
