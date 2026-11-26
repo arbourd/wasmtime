@@ -38,6 +38,21 @@ const SINGLE_CRATE_BUCKETS = [
   "wasmtime-wasi",
 ];
 
+// s390x times: component-async-tests 322 s, wasmtime-wasi-http 300 s,
+// wasmtime-wizer 96 s, pulley-interpreter 48 s. Place each in the lightest
+// bucket by total weight, with ties going to the lowest bucket number.
+const QEMU_HEAVY_CRATE_BUCKETS = [
+  ["component-async-tests"],
+  ["wasmtime-wasi-http"],
+  ["wasmtime-wizer", "pulley-interpreter"],
+];
+
+// These filters are complements: one selects component_model:: tests, and one skips them.
+const QEMU_CLI_ALL_SUB_BUCKETS = [
+  { name: "all-component-model", args: "--test all -- component_model::" },
+  { name: "all-other", args: "--test all -- --skip component_model::" },
+];
+
 // Helper: get just the crate name from a SINGLE_CRATE_BUCKETS entry.
 function singleBucketCrateName(entry) {
   return typeof entry === "string" ? entry : entry.crate;
@@ -271,23 +286,53 @@ async function shard(configs) {
   // --workspace --exclude ...`) or an object `{ crate, sub }` describing a
   // single-crate bucket that should be further split by `--test` filter.
   const singleBucketCrateNames = new Set(SINGLE_CRATE_BUCKETS.map(singleBucketCrateName));
-  const buckets = Array.from({ length: GENERIC_BUCKETS }, _ => new Set());
-  let i = 0;
-  for (const crate of members) {
-    if (singleBucketCrateNames.has(crate)) continue;
-    buckets[i].add(crate);
-    i = (i + 1) % GENERIC_BUCKETS;
+  const qemuHeavyCrates = new Set();
+  for (const crates of QEMU_HEAVY_CRATE_BUCKETS) {
+    for (const crate of crates) {
+      if (!members.includes(crate)) {
+        throw new Error(`QEMU heavy crate '${crate}' is not a workspace member`);
+      }
+      if (qemuHeavyCrates.has(crate)) {
+        throw new Error(`QEMU heavy crate '${crate}' appears more than once`);
+      }
+      if (singleBucketCrateNames.has(crate)) {
+        throw new Error(`QEMU heavy crate '${crate}' is also in SINGLE_CRATE_BUCKETS`);
+      }
+      qemuHeavyCrates.add(crate);
+    }
   }
-  for (const entry of SINGLE_CRATE_BUCKETS) {
-    if (typeof entry === "string") {
-      buckets.push(new Set([entry]));
-    } else {
-      // A crate with sub-buckets: push one bucket per `sub` entry, retaining
-      // the crate name and extra-args for naming and bucket-arg expansion.
-      for (const sub of entry.sub) {
-        buckets.push({ crate: entry.crate, name: sub.name, args: sub.args });
+
+  function makeBuckets(useQemuWeights) {
+    const buckets = Array.from({ length: GENERIC_BUCKETS }, _ => new Set());
+    const assigned = new Set();
+
+    if (useQemuWeights) {
+      for (let i = 0; i < QEMU_HEAVY_CRATE_BUCKETS.length; i++) {
+        for (const crate of QEMU_HEAVY_CRATE_BUCKETS[i]) {
+          buckets[i].add(crate);
+          assigned.add(crate);
+        }
       }
     }
+
+    let i = 0;
+    for (const crate of members) {
+      if (singleBucketCrateNames.has(crate) || assigned.has(crate)) continue;
+      buckets[i].add(crate);
+      i = (i + 1) % GENERIC_BUCKETS;
+    }
+    for (const entry of SINGLE_CRATE_BUCKETS) {
+      if (typeof entry === "string") {
+        buckets.push(new Set([entry]));
+      } else {
+        // A crate with sub-buckets: push one bucket per `sub` entry, retaining
+        // the crate name and extra-args for naming and bucket-arg expansion.
+        for (const sub of entry.sub) {
+          buckets.push({ crate: entry.crate, name: sub.name, args: sub.args });
+        }
+      }
+    }
+    return buckets;
   }
 
   // For each config, expand it into N configs, one for each disjoint set we
@@ -315,37 +360,57 @@ async function shard(configs) {
       continue;
     }
 
+    const buckets = makeBuckets(config.qemu !== undefined);
     let nbucket = 1;
+    let cliAllSplitRows = 0;
     for (const bucket of buckets) {
-      let bucket_name;
-      let bucket_args;
-      if (bucket instanceof Set) {
-        bucket_name = bucket.size === 1
-          ? Array.from(bucket)[0]
-          : `${nbucket}/${buckets.length}`;
-        bucket_args = members
-          .map(c => bucket.has(c) ? `--package ${c}` : `--exclude ${c}`)
-          .join(" ");
-      } else {
-        // Sub-bucket of a single crate.
-        bucket_name = `${bucket.crate}-${bucket.name}`;
-        bucket_args = members
-          .map(c => c === bucket.crate ? `--package ${c}` : `--exclude ${c}`)
-          .join(" ") + " " + bucket.args;
-      }
+      const variants = config.qemu !== undefined
+        && !(bucket instanceof Set)
+        && bucket.crate === "wasmtime-cli"
+        && bucket.name === "all"
+        ? QEMU_CLI_ALL_SUB_BUCKETS.map(sub => ({ crate: bucket.crate, ...sub }))
+        : [bucket];
 
-      sharded.push(Object.assign(
-        {},
-        config,
-        {
-          name: `${config.name} (${bucket_name})`,
-          // We run tests via `cargo test --workspace`, so exclude crates that
-          // aren't in this bucket, rather than naming only the crates that are
-          // in this bucket.
-          bucket: bucket_args,
+      for (const variant of variants) {
+        if (config.qemu !== undefined
+          && variant.crate === "wasmtime-cli"
+          && variant.name.startsWith("all-")) {
+          cliAllSplitRows += 1;
         }
-      ));
+
+        let bucket_name;
+        let bucket_args;
+        if (variant instanceof Set) {
+          bucket_name = variant.size === 1
+            ? Array.from(variant)[0]
+            : `${nbucket}/${buckets.length}`;
+          bucket_args = members
+            .map(c => variant.has(c) ? `--package ${c}` : `--exclude ${c}`)
+            .join(" ");
+        } else {
+          // Sub-bucket of a single crate.
+          bucket_name = `${variant.crate}-${variant.name}`;
+          bucket_args = members
+            .map(c => c === variant.crate ? `--package ${c}` : `--exclude ${c}`)
+            .join(" ") + " " + variant.args;
+        }
+
+        sharded.push(Object.assign(
+          {},
+          config,
+          {
+            name: `${config.name} (${bucket_name})`,
+            // We run tests via `cargo test --workspace`, so exclude crates that
+            // aren't in this bucket, rather than naming only the crates that are
+            // in this bucket.
+            bucket: bucket_args,
+          }
+        ));
+      }
       nbucket += 1;
+    }
+    if (config.qemu !== undefined && cliAllSplitRows < 2) {
+      throw new Error(`QEMU configuration '${config.name}' produced no wasmtime-cli-all split`);
     }
   }
   return sharded;
