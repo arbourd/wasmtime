@@ -38,19 +38,13 @@ const SINGLE_CRATE_BUCKETS = [
   "wasmtime-wasi",
 ];
 
-// s390x times: component-async-tests 322 s, wasmtime-wasi-http 300 s,
-// wasmtime-wizer 96 s, pulley-interpreter 48 s. Place each in the lightest
-// bucket by total weight, with ties going to the lowest bucket number.
-const QEMU_HEAVY_CRATE_BUCKETS = [
-  ["component-async-tests"],
-  ["wasmtime-wasi-http"],
-  ["wasmtime-wizer", "pulley-interpreter"],
-];
+const QEMU_SINGLE_CRATE_BUCKETS = ["component-async-tests"];
 
-// These filters are complements: one selects component_model:: tests, and one skips them.
+// The 184 cli_tests:: tests start wasmtime as a new process under QEMU and dominate runtime.
+// The component_model:: tests take about six seconds in total.
 const QEMU_CLI_ALL_SUB_BUCKETS = [
-  { name: "all-component-model", args: "--test all -- component_model::" },
-  { name: "all-other", args: "--test all -- --skip component_model::" },
+  { name: "all-cli", args: "--test all -- cli_tests::" },
+  { name: "all-other", args: "--test all -- --skip cli_tests::" },
 ];
 
 // Helper: get just the crate name from a SINGLE_CRATE_BUCKETS entry.
@@ -286,40 +280,39 @@ async function shard(configs) {
   // --workspace --exclude ...`) or an object `{ crate, sub }` describing a
   // single-crate bucket that should be further split by `--test` filter.
   const singleBucketCrateNames = new Set(SINGLE_CRATE_BUCKETS.map(singleBucketCrateName));
-  const qemuHeavyCrates = new Set();
-  for (const crates of QEMU_HEAVY_CRATE_BUCKETS) {
-    for (const crate of crates) {
+  const qemuSingleCrateNames = new Set();
+  if (configs.some(config => config.qemu !== undefined)) {
+    for (const crate of QEMU_SINGLE_CRATE_BUCKETS) {
       if (!members.includes(crate)) {
-        throw new Error(`QEMU heavy crate '${crate}' is not a workspace member`);
-      }
-      if (qemuHeavyCrates.has(crate)) {
-        throw new Error(`QEMU heavy crate '${crate}' appears more than once`);
+        throw new Error(`QEMU single-crate bucket '${crate}' is not a workspace member`);
       }
       if (singleBucketCrateNames.has(crate)) {
-        throw new Error(`QEMU heavy crate '${crate}' is also in SINGLE_CRATE_BUCKETS`);
+        throw new Error(`QEMU single-crate bucket '${crate}' is also in SINGLE_CRATE_BUCKETS`);
       }
-      qemuHeavyCrates.add(crate);
+      if (qemuSingleCrateNames.has(crate)) {
+        throw new Error(`QEMU single-crate bucket '${crate}' appears more than once`);
+      }
+      qemuSingleCrateNames.add(crate);
     }
   }
 
-  function makeBuckets(useQemuWeights) {
+  function makeBuckets(isQemu) {
     const buckets = Array.from({ length: GENERIC_BUCKETS }, _ => new Set());
-    const assigned = new Set();
-
-    if (useQemuWeights) {
-      for (let i = 0; i < QEMU_HEAVY_CRATE_BUCKETS.length; i++) {
-        for (const crate of QEMU_HEAVY_CRATE_BUCKETS[i]) {
-          buckets[i].add(crate);
-          assigned.add(crate);
-        }
-      }
-    }
 
     let i = 0;
     for (const crate of members) {
-      if (singleBucketCrateNames.has(crate) || assigned.has(crate)) continue;
+      if (singleBucketCrateNames.has(crate)) continue;
+      if (isQemu && qemuSingleCrateNames.has(crate)) {
+        i = (i + 1) % GENERIC_BUCKETS;
+        continue;
+      }
       buckets[i].add(crate);
       i = (i + 1) % GENERIC_BUCKETS;
+    }
+    if (isQemu) {
+      for (const crate of qemuSingleCrateNames) {
+        buckets.push(new Set([crate]));
+      }
     }
     for (const entry of SINGLE_CRATE_BUCKETS) {
       if (typeof entry === "string") {
